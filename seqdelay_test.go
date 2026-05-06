@@ -356,3 +356,59 @@ func TestQueue_OnExpire_Conflict(t *testing.T) {
 		t.Errorf("expected ErrTopicConflict, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PopTask CAS atomicity test
+// ---------------------------------------------------------------------------
+
+// TestQueue_PopTask_CASAtomicity verifies that PopTask updates state atomically.
+// This prevents task loss if the process crashes between BLPOP and state update.
+func TestQueue_PopTask_CASAtomicity(t *testing.T) {
+	client := getTestRedis(t)
+	defer client.Close()
+
+	q, err := New(
+		WithRedisClient(client),
+		WithTickInterval(5*time.Millisecond),
+		WithPopTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.Background()
+	if err := q.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer q.Shutdown(ctx) //nolint:errcheck
+
+	q.lock.TryAcquire(ctx)
+
+	// Add a task and wait for it to become ready
+	task := &Task{
+		ID:    "cas-test",
+		Topic: "test-cas",
+		Body:  []byte("data"),
+		Delay: 20 * time.Millisecond,
+		TTR:   30 * time.Second,
+	}
+	if err := q.Add(ctx, task); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Pop should succeed and update state atomically
+	popped, err := q.Pop(ctx, task.Topic)
+	if err != nil {
+		t.Fatalf("Pop: %v", err)
+	}
+	if popped == nil {
+		t.Fatal("Pop returned nil")
+	}
+	if popped.State != StateActive {
+		t.Errorf("expected StateActive, got %v", popped.State)
+	}
+	if popped.ActiveAt.IsZero() {
+		t.Error("ActiveAt should be set after Pop")
+	}
+}
