@@ -370,6 +370,31 @@ func (s *store) PopTask(ctx context.Context, topic string, timeout time.Duration
 }
 
 // ---------------------------------------------------------------------------
+// ReadyListIDs / RequeueReady
+// ---------------------------------------------------------------------------
+
+// ReadyListIDs returns the set of task IDs currently sitting on the topic's
+// ready list. Used by recover() to detect orphan StateReady tasks whose IDs
+// went missing because a previous process crashed mid-Pop.
+func (s *store) ReadyListIDs(ctx context.Context, topic string) (map[string]struct{}, error) {
+	ids, err := s.client.LRange(ctx, readyKey(topic), 0, -1).Result()
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set, nil
+}
+
+// RequeueReady appends id to the topic's ready list. Idempotency is the
+// caller's responsibility (recover checks ReadyListIDs first).
+func (s *store) RequeueReady(ctx context.Context, topic, id string) error {
+	return s.client.RPush(ctx, readyKey(topic), id).Err()
+}
+
+// ---------------------------------------------------------------------------
 // LoadTopicTasks
 // ---------------------------------------------------------------------------
 
