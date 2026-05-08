@@ -356,3 +356,90 @@ func TestQueue_OnExpire_Conflict(t *testing.T) {
 		t.Errorf("expected ErrTopicConflict, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Recover: orphan StateReady tasks
+// ---------------------------------------------------------------------------
+
+// TestQueue_Recover_OrphanReadyTask plants the state a previous process leaves
+// behind when it crashes between BLPOP and the state update inside PopTask:
+// the task is stored as StateReady, but its ID is no longer on the ready list.
+// recover() should re-enqueue the orphan so it isn't lost.
+func TestQueue_Recover_OrphanReadyTask(t *testing.T) {
+	client := getTestRedis(t)
+	defer client.Close()
+
+	ctx := context.Background()
+	s := newStore(client)
+
+	// Persist a task in StateReady without pushing the ID onto the ready list.
+	orphan := newTestTask("orphan-topic", "orphan-1")
+	orphan.State = StateReady
+	if err := s.SaveTask(ctx, orphan); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	// Sanity: ready list is empty, task is in StateReady.
+	if n, _ := client.LLen(ctx, readyKey(orphan.Topic)).Result(); n != 0 {
+		t.Fatalf("ready list should start empty, got %d", n)
+	}
+
+	q, err := New(
+		WithRedisClient(client),
+		WithTickInterval(10*time.Millisecond),
+		WithPopTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := q.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer q.Shutdown(ctx) //nolint:errcheck
+
+	// After Start (which calls recover), the orphan ID should be back on the
+	// ready list and Pop should return it.
+	popped, err := q.Pop(ctx, orphan.Topic)
+	if err != nil {
+		t.Fatalf("Pop: %v", err)
+	}
+	if popped == nil {
+		t.Fatal("Pop returned nil — orphan was not recovered")
+	}
+	if popped.ID != orphan.ID {
+		t.Errorf("recovered wrong task: got %q, want %q", popped.ID, orphan.ID)
+	}
+}
+
+// TestQueue_Recover_LiveReadyTaskNotDuplicated guards against the inverse:
+// when a StateReady task's ID is already on the ready list, recover() must
+// not push a duplicate.
+func TestQueue_Recover_LiveReadyTaskNotDuplicated(t *testing.T) {
+	client := getTestRedis(t)
+	defer client.Close()
+
+	ctx := context.Background()
+	s := newStore(client)
+
+	live := newTestTask("live-topic", "live-1")
+	live.State = StateReady
+	if err := s.SaveTask(ctx, live); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+	if err := client.RPush(ctx, readyKey(live.Topic), live.ID).Err(); err != nil {
+		t.Fatalf("RPush: %v", err)
+	}
+
+	q, err := New(WithRedisClient(client), WithTickInterval(10*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := q.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer q.Shutdown(ctx) //nolint:errcheck
+
+	if n, _ := client.LLen(ctx, readyKey(live.Topic)).Result(); n != 1 {
+		t.Errorf("ready list should still hold exactly 1 entry, got %d", n)
+	}
+}

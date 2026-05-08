@@ -125,6 +125,13 @@ func (q *Queue) recover(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
+
+		// Pre-fetch the ready list once so StateReady checks below are O(1).
+		// Best-effort: on error we treat the set as empty, which means orphans
+		// get re-enqueued (safe) and live IDs may get duplicated (harmless —
+		// the duplicate just becomes a stale ID once the original is popped).
+		readySet, _ := q.store.ReadyListIDs(ctx, topic)
+
 		for _, task := range tasks {
 			switch task.State {
 			case StateDelayed:
@@ -142,7 +149,12 @@ func (q *Queue) recover(ctx context.Context) error {
 					q.wheel.add(remaining, task.ID, task.Topic)
 				}
 			case StateReady:
-				// Already in the ready list — nothing to do.
+				// If the ID isn't on the ready list, the previous process
+				// crashed between BLPOP and the state update — re-enqueue so
+				// the task isn't lost.
+				if _, ok := readySet[task.ID]; !ok {
+					_ = q.store.RequeueReady(ctx, topic, task.ID)
+				}
 			case StateFinished, StateCancelled:
 				_ = q.store.CleanupIndex(ctx, topic, task.ID)
 			}
