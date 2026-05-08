@@ -46,15 +46,7 @@ func New(opts ...Option) (*Queue, error) {
 
 	s := newStore(cfg.redisClient)
 
-	onFire := func(taskID, topic string) {
-		// Only the leader is responsible for advancing tasks to ready.
-		if !newDistLock(cfg.redisClient, cfg.instanceID, cfg.lockTTL).IsLeader(context.Background()) {
-			return
-		}
-		_ = s.ReadyTask(context.Background(), topic, taskID)
-	}
-
-	wheel := newTimeWheel(cfg.wheelCapacity, cfg.tickInterval, onFire)
+	wheel := newTimeWheel(cfg.wheelCapacity, cfg.tickInterval, nil)
 	ready := newReadyQueue(s, cfg.maxTopics)
 	lock := newDistLock(cfg.redisClient, cfg.instanceID, cfg.lockTTL)
 
@@ -67,8 +59,8 @@ func New(opts ...Option) (*Queue, error) {
 		stopCh: make(chan struct{}),
 	}
 
-	// Replace the onFire closure with one that references q.lock directly so
-	// we share the single distLock instance instead of creating new ones.
+	// Set onFire after Queue creation so it can reference q.lock.
+	// The wheel doesn't tick until Start() is called.
 	wheel.onFire = func(taskID, topic string) {
 		if !q.lock.IsLeader(context.Background()) {
 			return

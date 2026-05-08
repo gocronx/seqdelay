@@ -8,7 +8,7 @@ var (
 	ErrInvalidState  = errors.New("seqdelay: invalid task state for this operation")
 	ErrTopicConflict = errors.New("seqdelay: topic already has a callback registered")
 	ErrTooManyTopics = errors.New("seqdelay: max topic count exceeded")
-	ErrQueueFull     = errors.New("seqdelay: ready queue is full")
+	ErrQueueFull     = errors.New("seqdelay: ready queue is full") // Reserved for future use
 	ErrClosed        = errors.New("seqdelay: queue is closed")
 	ErrRedisRequired = errors.New("seqdelay: redis connection is required")
 	ErrInvalidTask   = errors.New("seqdelay: task ID and Topic are required")
