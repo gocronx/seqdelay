@@ -224,3 +224,50 @@ loop:
 		t.Errorf("fired = %v, want [keep-me]", got)
 	}
 }
+
+// TestTimeWheel_PlaceAdd_PastDeadlineFiresImmediately is the regression test
+// for the producer-preempted-after-cursor-load race that left tasks stranded
+// for a full wheel cycle. Simulates a cmd arriving at the handler after the
+// cursor has already advanced past its target sequence, and asserts the
+// handler fires it immediately instead of appending to a stale slot.
+func TestTimeWheel_PlaceAdd_PastDeadlineFiresImmediately(t *testing.T) {
+	var fired []string
+	tw := newTimeWheel(64, testTick, func(id, _ string) {
+		fired = append(fired, id)
+	})
+	// Note: don't start the wheel — placeAdd is invoked synchronously by the
+	// handler goroutine; calling it directly here is safe because no other
+	// goroutine touches the wheel state.
+
+	// targetSeq=15, but the handler has already advanced to seq=20.
+	tw.placeAdd(addCmd{targetSeq: 15, taskID: "stranded", topic: "t"}, 20)
+
+	if len(fired) != 1 || fired[0] != "stranded" {
+		t.Errorf("expected immediate fire of stranded task, got %v", fired)
+	}
+	for _, slot := range tw.slots {
+		if len(slot.entries) != 0 {
+			t.Errorf("stranded cmd should not have been appended to any slot")
+		}
+	}
+}
+
+// TestTimeWheel_PlaceAdd_CancelledIsDropped verifies that a cmd whose taskID
+// is in the lazy-cancel set is silently dropped, even when its deadline has
+// already passed.
+func TestTimeWheel_PlaceAdd_CancelledIsDropped(t *testing.T) {
+	var fired []string
+	tw := newTimeWheel(64, testTick, func(id, _ string) {
+		fired = append(fired, id)
+	})
+	tw.cancelled["stranded"] = struct{}{}
+
+	tw.placeAdd(addCmd{targetSeq: 15, taskID: "stranded", topic: "t"}, 20)
+
+	if len(fired) != 0 {
+		t.Errorf("cancelled task should not fire, got %v", fired)
+	}
+	if _, stillCancelled := tw.cancelled["stranded"]; stillCancelled {
+		t.Errorf("cancelled set entry should be consumed after drop")
+	}
+}
