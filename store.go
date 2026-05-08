@@ -97,23 +97,6 @@ redis.call('RPUSH', KEYS[2], ARGV[3])
 return 1
 `)
 
-// luaPop atomically pops a task ID from the ready list and transitions it to
-// StateActive with ActiveAt timestamp. This prevents task loss if the process
-// crashes between BLPOP and SET.
-//
-// KEYS[1] = readyKey    KEYS[2] = taskKey
-// ARGV[1] = expected raw bytes (old)    ARGV[2] = new encoded bytes
-var luaPop = redis.NewScript(`
-local id = redis.call('LPOP', KEYS[1])
-if not id then return nil end
-local key = KEYS[2] .. id
-local raw = redis.call('GET', key)
-if not raw then return {id, nil} end
-if raw ~= ARGV[1] then return {id, nil, -2} end
-redis.call('SET', key, ARGV[2], 'KEEPTTL')
-return {id, raw}
-`)
-
 // ---------------------------------------------------------------------------
 // SaveTask
 // ---------------------------------------------------------------------------
@@ -342,12 +325,8 @@ func (s *store) ReadyTask(ctx context.Context, topic, id string) error {
 // PopTask blocks on the topic's ready list until a task ID arrives or timeout
 // elapses.  On success the task state is updated to StateActive and ActiveAt is
 // set to the current time.  The TTL is preserved via KEEPTTL.
-//
-// Uses CAS to ensure atomicity - if the process crashes after BLPOP but before
-// the state update, we'd lose the task (it's gone from ready list but still
-// marked StateReady). The CAS retry handles concurrent modifications.
+// Returns ErrTaskNotFound if the task disappears between BLPOP and GET (race).
 func (s *store) PopTask(ctx context.Context, topic string, timeout time.Duration) (*Task, error) {
-	// First, block until a task ID is available
 	result, err := s.client.BLPop(ctx, timeout, readyKey(topic)).Result()
 	if err == redis.Nil {
 		// Timeout elapsed with no item.
@@ -361,7 +340,6 @@ func (s *store) PopTask(ctx context.Context, topic string, timeout time.Duration
 
 	key := taskKey(topic, id)
 
-	// Read current task state
 	oldRaw, err := s.client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		return nil, ErrTaskNotFound
@@ -375,7 +353,6 @@ func (s *store) PopTask(ctx context.Context, topic string, timeout time.Duration
 		return nil, err
 	}
 
-	// Update to Active state
 	t.State = StateActive
 	t.ActiveAt = time.Now()
 
@@ -384,29 +361,9 @@ func (s *store) PopTask(ctx context.Context, topic string, timeout time.Duration
 		return nil, err
 	}
 
-	// Use CAS to ensure atomicity
-	keys := []string{key}
-	argv := []any{oldRaw, newRaw}
-
-	// Simple CAS: if current value matches oldRaw, set to newRaw
-	script := redis.NewScript(`
-local raw = redis.call('GET', KEYS[1])
-if not raw then return -1 end
-if raw ~= ARGV[1] then return -2 end
-redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
-return 1
-`)
-
-	res, err := script.Run(ctx, s.client, keys, argv...).Int()
-	if err != nil {
+	// Use SET … KEEPTTL so the original expiry is preserved.
+	if err := s.client.Set(ctx, key, newRaw, redis.KeepTTL).Err(); err != nil {
 		return nil, err
-	}
-	switch res {
-	case -1:
-		return nil, ErrTaskNotFound
-	case -2:
-		// CAS miss — retry once
-		return s.PopTask(ctx, topic, 0)
 	}
 
 	return t, nil

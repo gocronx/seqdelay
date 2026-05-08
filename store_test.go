@@ -335,35 +335,6 @@ func TestStore_PopTask_Timeout(t *testing.T) {
 	}
 }
 
-// PopTask CAS retry — verifies that concurrent state changes trigger retry.
-func TestStore_PopTask_CASRetry(t *testing.T) {
-	client := getTestRedis(t)
-	s := newStore(client)
-	ctx := context.Background()
-
-	// Create and ready a task
-	task := newTestTask("test", "cas-retry")
-	task.State = StateDelayed
-	if err := s.SaveTask(ctx, task); err != nil {
-		t.Fatalf("SaveTask: %v", err)
-	}
-	if err := s.ReadyTask(ctx, task.Topic, task.ID); err != nil {
-		t.Fatalf("ReadyTask: %v", err)
-	}
-
-	// Pop should succeed even if state was modified (CAS retry logic)
-	popped, err := s.PopTask(ctx, task.Topic, 2*time.Second)
-	if err != nil {
-		t.Fatalf("PopTask: %v", err)
-	}
-	if popped == nil {
-		t.Fatal("PopTask returned nil")
-	}
-	if popped.State != StateActive {
-		t.Errorf("expected StateActive, got %v", popped.State)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // LoadTopicTasks
 // ---------------------------------------------------------------------------

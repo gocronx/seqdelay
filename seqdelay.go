@@ -59,7 +59,8 @@ func New(opts ...Option) (*Queue, error) {
 		stopCh: make(chan struct{}),
 	}
 
-	// Set onFire callback that uses the shared lock instance.
+	// Set onFire after Queue creation so it can reference q.lock.
+	// The wheel doesn't tick until Start() is called.
 	wheel.onFire = func(taskID, topic string) {
 		if !q.lock.IsLeader(context.Background()) {
 			return
