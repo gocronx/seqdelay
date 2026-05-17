@@ -54,30 +54,35 @@ return 1
 // verifies the state is StateActive, re-encodes with StateFinished, then
 // passes both old and new bytes to this script.
 //
-// KEYS[1] = taskKey    KEYS[2] = indexKey
+// The task ID stays in the topic index for the 60s tombstone window so
+// observability tools (e.g. an admin console listing tasks) can show the
+// terminal state. LoadTopicTasks handles the post-TTL stale-entry cleanup
+// lazily — once the task key expires, SMembers still yields the id but the
+// per-task GET returns redis.Nil and the caller calls CleanupIndex.
+//
+// KEYS[1] = taskKey    KEYS[2] = indexKey (unused, kept for caller symmetry)
 // ARGV[1] = expected raw bytes (old)    ARGV[2] = new encoded bytes
-// ARGV[3] = new TTL milliseconds (60000)    ARGV[4] = task ID
+// ARGV[3] = new TTL milliseconds (60000)    ARGV[4] = task ID (unused)
 var luaFinish = redis.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return -1 end
 if raw ~= ARGV[1] then return -2 end
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-redis.call('SREM', KEYS[2], ARGV[4])
 return 1
 `)
 
 // luaCancel atomically cancels a task regardless of its current state.
-// Same CAS pattern as luaFinish.
+// Same CAS pattern as luaFinish, and same tombstone behaviour: the id stays
+// in the index for the 60s window so the cancelled state is observable.
 //
-// KEYS[1] = taskKey    KEYS[2] = indexKey
+// KEYS[1] = taskKey    KEYS[2] = indexKey (unused, kept for caller symmetry)
 // ARGV[1] = expected raw bytes (old)    ARGV[2] = new encoded bytes
-// ARGV[3] = new TTL milliseconds (60000)    ARGV[4] = task ID
+// ARGV[3] = new TTL milliseconds (60000)    ARGV[4] = task ID (unused)
 var luaCancel = redis.NewScript(`
 local raw = redis.call('GET', KEYS[1])
 if not raw then return -1 end
 if raw ~= ARGV[1] then return -2 end
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-redis.call('SREM', KEYS[2], ARGV[4])
 return 1
 `)
 

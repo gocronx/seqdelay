@@ -26,3 +26,4 @@ benchmark_results.txt
 
 # 调试
 __debug_bin*
+.gstack/
