@@ -43,3 +43,25 @@ jobs:
 
       - name: Benchmark (time wheel only)
         run: go test -bench=BenchmarkTimeWheel -benchmem -count=1 -short -timeout 60s
+
+      # End-to-end behavioural bench: throughput, delay precision, cancel
+      # safety, mixed-delay no-HoL. Spins up the HTTP server in the
+      # background, runs scripts/bench-real, then tears it down. Admin
+      # consistency test is skipped (admin lives in a separate repo).
+      - name: End-to-end bench (HTTP + time wheel + cancel)
+        run: |
+          # Build + launch the HTTP server.
+          go build -o /tmp/seqdelay-server ./example/httpserver
+          /tmp/seqdelay-server &
+          SERVER_PID=$!
+          # Wait for /stats to respond (max 10s).
+          for i in $(seq 1 50); do
+            if curl -sf http://localhost:9280/stats >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          # Run the bench.
+          SKIP_ADMIN_TEST=1 go run ./scripts/bench-real
+          # Cleanup.
+          kill $SERVER_PID 2>/dev/null || true

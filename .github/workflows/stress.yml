@@ -1,0 +1,73 @@
+name: Stress
+
+# Stress / load tests. Heavier than the per-PR bench — runs:
+#   - on demand via "Run workflow"
+#   - nightly on the default branch
+#
+# Failures here flag real regressions in fire-rate or sustained throughput,
+# but the absolute numbers also drift with runner hardware. Treat trends as
+# signal, single absolute values as noise.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *' # 04:17 UTC nightly
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Launch seqdelay HTTP server
+        run: |
+          go build -o /tmp/seqdelay-server ./example/httpserver
+          /tmp/seqdelay-server &
+          echo $! > /tmp/seqdelay.pid
+          for i in $(seq 1 50); do
+            if curl -sf http://localhost:9280/stats >/dev/null 2>&1; then
+              echo "server ready"
+              break
+            fi
+            sleep 0.2
+          done
+
+      # Sustained load is the slow one (default 30s). CI uses 20s to stay
+      # under the runner's noise floor while still exercising fire-throughput.
+      # Burst is capped at 20k for the same reason; large bursts on shared
+      # runners drift wildly.
+      - name: Stress test
+        run: |
+          go run ./scripts/stress-real \
+            -sustained=20s \
+            -burst=20000 \
+            -topics=50 \
+            -per-topic=200
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/seqdelay.pid ]; then
+            kill "$(cat /tmp/seqdelay.pid)" 2>/dev/null || true
+          fi
