@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -45,6 +46,10 @@ func NewServer(q *Queue, opts ...ServerOption) *Server {
 	mux.HandleFunc("POST /cancel", s.handleCancel)
 	mux.HandleFunc("GET /get", s.handleGet)
 	mux.HandleFunc("GET /stats", s.handleStats)
+
+	// Admin / management endpoints (used by the seqdelay-admin web console).
+	mux.HandleFunc("GET /topics", s.handleListTopics)
+	mux.HandleFunc("GET /tasks", s.handleListTasks)
 
 	s.server = &http.Server{
 		Addr:    s.addr,
@@ -263,17 +268,58 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{Code: 0, Data: task})
 }
 
-// topicStats holds per-topic ready and active counts.
+// topicStats holds per-topic counts broken down by task state.
 type topicStats struct {
-	Ready  int64 `json:"ready"`
-	Active int64 `json:"active"`
+	Ready     int64 `json:"ready"`
+	Delayed   int64 `json:"delayed"`
+	Active    int64 `json:"active"`
+	Finished  int64 `json:"finished"`
+	Cancelled int64 `json:"cancelled"`
+	Total     int64 `json:"total"`
+}
+
+// computeTopicStats returns per-state counts for the given topic.
+// Reads the topic index and tallies live tasks; the ready-list length is taken
+// from Redis directly so it stays accurate even when index entries lag.
+func (s *Server) computeTopicStats(ctx context.Context, topic string) topicStats {
+	stats := topicStats{}
+	stats.Ready, _ = s.queue.cfg.redisClient.LLen(ctx, readyKey(topic)).Result()
+
+	tasks, _ := s.queue.store.LoadTopicTasks(ctx, topic)
+	for _, t := range tasks {
+		stats.Total++
+		switch t.State {
+		case StateDelayed:
+			stats.Delayed++
+		case StateActive:
+			stats.Active++
+		case StateFinished:
+			stats.Finished++
+		case StateCancelled:
+			stats.Cancelled++
+		}
+	}
+	return stats
 }
 
 // handleStats handles GET /stats.
-// Returns per-topic ready-list length and active task count derived from the
-// Redis index.
+// Returns per-topic counts broken down by task state.
+//
+// Optional query parameter:
+//   - topic — return stats only for the named topic.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	if topic := r.URL.Query().Get("topic"); topic != "" {
+		writeJSON(w, http.StatusOK, apiResponse{
+			Code: 0,
+			Data: map[string]any{
+				"topic": topic,
+				"stats": s.computeTopicStats(ctx, topic),
+			},
+		})
+		return
+	}
 
 	topics, err := s.queue.store.ListTopics(ctx)
 	if err != nil {
@@ -283,21 +329,169 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	stats := make(map[string]topicStats, len(topics))
 	for _, topic := range topics {
-		ready, _ := s.queue.cfg.redisClient.LLen(ctx, readyKey(topic)).Result()
-
-		tasks, _ := s.queue.store.LoadTopicTasks(ctx, topic)
-		var active int64
-		for _, t := range tasks {
-			if t.State == StateActive {
-				active++
-			}
-		}
-
-		stats[topic] = topicStats{Ready: ready, Active: active}
+		stats[topic] = s.computeTopicStats(ctx, topic)
 	}
 
 	writeJSON(w, http.StatusOK, apiResponse{
 		Code: 0,
 		Data: map[string]any{"topics": stats},
 	})
+}
+
+// topicSummary is the per-topic entry returned by GET /topics.
+type topicSummary struct {
+	Name  string     `json:"name"`
+	Stats topicStats `json:"stats"`
+}
+
+// handleListTopics handles GET /topics.
+// Returns the list of known topics together with their per-state counts.
+func (s *Server) handleListTopics(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	topics, err := s.queue.store.ListTopics(ctx)
+	if err != nil {
+		errResponse(w, err)
+		return
+	}
+
+	list := make([]topicSummary, 0, len(topics))
+	for _, topic := range topics {
+		list = append(list, topicSummary{
+			Name:  topic,
+			Stats: s.computeTopicStats(ctx, topic),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, apiResponse{
+		Code: 0,
+		Data: map[string]any{
+			"topics": list,
+			"total":  len(list),
+		},
+	})
+}
+
+// taskListItem is the per-task entry returned by GET /tasks.
+// Body is base64-omitted here — callers fetch the full record via /get when needed.
+type taskListItem struct {
+	ID         string `json:"id"`
+	Topic      string `json:"topic"`
+	Body       string `json:"body"`
+	State      string `json:"state"`
+	DelayMS    int64  `json:"delay_ms"`
+	TTRMS      int64  `json:"ttr_ms"`
+	MaxRetries int    `json:"max_retries"`
+	Retries    int    `json:"retries"`
+	CreatedAt  int64  `json:"created_at"`
+	ActiveAt   int64  `json:"active_at"`
+}
+
+// handleListTasks handles GET /tasks.
+// Query parameters:
+//   - topic     — required, the topic to inspect
+//   - state     — optional, filter by task state name (delayed/ready/active/finished/cancelled)
+//   - page      — optional, 1-based page number (default 1)
+//   - page_size — optional, max 200 (default 20)
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	topic := r.URL.Query().Get("topic")
+	if topic == "" {
+		writeJSON(w, http.StatusBadRequest, apiResponse{
+			Code:    http.StatusBadRequest,
+			Message: "topic query parameter is required",
+		})
+		return
+	}
+
+	stateFilter := r.URL.Query().Get("state")
+
+	page := parsePositiveInt(r.URL.Query().Get("page"), 1)
+	pageSize := parsePositiveInt(r.URL.Query().Get("page_size"), 20)
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	tasks, err := s.queue.store.LoadTopicTasks(ctx, topic)
+	if err != nil {
+		errResponse(w, err)
+		return
+	}
+
+	// Filter + state-based projection in one pass; ready-list IDs need a Redis
+	// lookup because they don't have their own state stored.
+	readyIDs, _ := s.queue.store.ReadyListIDs(ctx, topic)
+
+	filtered := make([]*Task, 0, len(tasks))
+	for _, t := range tasks {
+		state := t.State.String()
+		if _, isReady := readyIDs[t.ID]; isReady && t.State == StateDelayed {
+			// Edge case: ID lives on the ready list but task record still says
+			// delayed (a moment of inconsistency during the transition). Report
+			// it as ready so the UI matches user expectation.
+			state = "ready"
+		}
+		if stateFilter != "" && state != stateFilter {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+
+	total := len(filtered)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	items := make([]taskListItem, 0, end-start)
+	for _, t := range filtered[start:end] {
+		state := t.State.String()
+		if _, isReady := readyIDs[t.ID]; isReady && t.State == StateDelayed {
+			state = "ready"
+		}
+		var activeAt int64
+		if !t.ActiveAt.IsZero() {
+			activeAt = t.ActiveAt.UnixMilli()
+		}
+		items = append(items, taskListItem{
+			ID:         t.ID,
+			Topic:      t.Topic,
+			Body:       string(t.Body),
+			State:      state,
+			DelayMS:    t.Delay.Milliseconds(),
+			TTRMS:      t.TTR.Milliseconds(),
+			MaxRetries: t.MaxRetries,
+			Retries:    t.Retries,
+			CreatedAt:  t.CreatedAt.UnixMilli(),
+			ActiveAt:   activeAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, apiResponse{
+		Code: 0,
+		Data: map[string]any{
+			"items":     items,
+			"total":     total,
+			"page":      page,
+			"page_size": pageSize,
+		},
+	})
+}
+
+// parsePositiveInt parses s as a positive int, returning fallback on failure or
+// when the result is <= 0.
+func parsePositiveInt(s string, fallback int) int {
+	if s == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
 }
