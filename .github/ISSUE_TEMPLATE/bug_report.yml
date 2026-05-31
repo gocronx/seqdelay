@@ -1,0 +1,91 @@
+name: 🐛 Bug Report
+description: Report a reproducible bug or unexpected behavior.
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      options:
+        - label: I have searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have read the documentation and this is not a usage question.
+          required: true
+        - label: I have confirmed the bug exists on the latest version.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: A minimal code snippet or the exact steps to reproduce.
+      placeholder: |
+        1. Enqueue a task with '...'
+        2. Wait for '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: Include error messages if any.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: seqdelay Version
+      description: Module version or git tag/commit you are running.
+      placeholder: "e.g. v0.1.0 or commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Usage Mode
+      options:
+        - Embedded library
+        - HTTP service
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Go version, OS/architecture, and Redis version.
+      placeholder: "e.g. Go 1.22, Ubuntu 22.04 amd64, Redis 7.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Config snippets or anything else that helps.

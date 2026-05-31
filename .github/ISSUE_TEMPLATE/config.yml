@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions & Discussions
+    url: https://github.com/gocronx/seqdelay/discussions
+    about: For usage questions, ideas, or general help, please use Discussions.
+  - name: 📖 Documentation
+    url: https://github.com/gocronx/seqdelay#readme
+    about: Most usage and configuration questions are answered in the README and docs.
+  - name: 🔒 Report a Security Vulnerability
+    url: https://github.com/gocronx/seqdelay/security/advisories/new
+    about: Please report security issues privately, NOT in public issues.
