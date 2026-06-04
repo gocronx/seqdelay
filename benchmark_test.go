@@ -75,6 +75,32 @@ func BenchmarkQueue_Add(b *testing.B) {
 	}
 }
 
+// BenchmarkQueue_AddParallel measures Add throughput with GOMAXPROCS
+// concurrent producers — closer to a real deployment's ceiling than the
+// serial single-connection number.
+func BenchmarkQueue_AddParallel(b *testing.B) {
+	if testing.Short() {
+		b.Skip("skipping Redis benchmark in short mode")
+	}
+	q := benchQueue(b)
+	ctx := context.Background()
+	var seq atomic.Int64
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			q.Add(ctx, &Task{
+				ID:    fmt.Sprintf("bp-%d", seq.Add(1)),
+				Topic: "bench",
+				Body:  []byte("{}"),
+				Delay: 10 * time.Second,
+				TTR:   30 * time.Second,
+			})
+		}
+	})
+}
+
 func BenchmarkQueue_AddPopFinish(b *testing.B) {
 	if testing.Short() {
 		b.Skip("skipping Redis benchmark in short mode")

@@ -289,15 +289,21 @@ Leader 宕机 → 锁 500ms 过期 → standby 自动接管。
 
 ## 性能
 
-```
-Apple M4 / arm64
+端到端数字 —— 带 Redis 的真实表现（Apple M4，本机 Redis 7，单实例，1ms tick）：
 
-时间轮（纯调度，无 Redis）：
-  100万 插入：           225ms（440万 tasks/sec）
-  100万 插入+触发：      1.2s（全部触发，零丢失）
-  4 并发写 × 25万：      187ms（530万 tasks/sec）
-  100万 取消：           268ms（290 ns/op）
-```
+| 操作 | 延迟 | 吞吐 |
+|---|---|---|
+| `Add`（单生产者，单连接） | 77 µs/op | ~1.3 万 tasks/sec |
+| `Add`（12 并发生产者） | 30 µs/op | ~3.3 万 tasks/sec |
+| Store `SaveTask` | 58 µs/op | ~1.7 万 ops/sec |
+| Store `GetTask` | 45 µs/op | ~2.2 万 ops/sec |
+| 分布式锁 获取+释放 | 97 µs/op | ~1 万 ops/sec |
+
+复现：`go test -bench='BenchmarkQueue|BenchmarkStore' -benchtime=3s -run='^$' .`
+
+瓶颈在 Redis 往返与 Lua 执行 —— 任何基于 Redis 的队列都一样。时间轮的意义
+是把"调度"彻底移出这个等式（内存上限参考：100 万插入 225ms ≈ 440万/秒，
+取消 290 ns/op），因此吞吐随你的 Redis 扩展，而与等待中的任务数量无关。
 
 ## 设计要点
 

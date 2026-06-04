@@ -289,15 +289,24 @@ Leader crash → lock expires (500ms) → standby takes over automatically.
 
 ## Performance
 
-```
-Apple M4 / arm64
+End-to-end numbers — what you actually get with Redis in the loop
+(Apple M4, local Redis 7, single queue instance, 1ms tick):
 
-Time wheel (pure scheduling, no Redis):
-  1M Add:           225ms (4.4M tasks/sec)
-  1M Add + Fire:    1.2s (all 1M fired, zero loss)
-  4 writers × 250K: 187ms (5.3M tasks/sec)
-  1M Cancel:        268ms (290 ns/op)
-```
+| Operation | Latency | Throughput |
+|---|---|---|
+| `Add` (1 producer, single conn) | 77 µs/op | ~13K tasks/sec |
+| `Add` (12 concurrent producers) | 30 µs/op | ~33K tasks/sec |
+| Store `SaveTask` | 58 µs/op | ~17K ops/sec |
+| Store `GetTask` | 45 µs/op | ~22K ops/sec |
+| DistLock acquire + release | 97 µs/op | ~10K ops/sec |
+
+Reproduce: `go test -bench='BenchmarkQueue|BenchmarkStore' -benchtime=3s -run='^$' .`
+
+The bottleneck is Redis round-trips and Lua execution — as it is for any
+Redis-backed queue. The time wheel removes scheduling from that equation
+entirely (in-memory ceiling, for reference: 1M adds in 225ms ≈ 4.4M/sec,
+1M cancels at 290 ns/op), so throughput scales with your Redis, not with
+how many tasks are waiting.
 
 ## Design
 
