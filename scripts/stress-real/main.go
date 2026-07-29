@@ -146,24 +146,13 @@ func stressSustained(dur time.Duration) {
 	// bounded by Redis IO, not the time wheel itself.
 	settleStart := time.Now()
 	settleDeadline := settleStart.Add(60 * time.Second)
-	var prev = -1
-	var fireRates []float64
-	for time.Now().Before(settleDeadline) {
-		res, err := listTasks(topic, "delayed", 1, 1000)
-		if err == nil {
-			cur := res.Total
-			if prev >= 0 {
-				fireRates = append(fireRates, float64(prev-cur))
-			}
-			prev = cur
-			if cur < 100 {
-				break
-			}
-		}
-		time.Sleep(1 * time.Second)
+	settled, fireRates, err := sampleDrain(settleDeadline, time.Second, func() (*listTasksResult, error) {
+		return listTasks(topic, "delayed", 1, 1000)
+	})
+	if err != nil {
+		fail("    unable to sample delayed backlog: %v", err)
+		return
 	}
-	res, _ := listTasks(topic, "delayed", 1, 1000)
-	settled := res.Total
 
 	// Average fire rate across the post-test drain window.
 	var avgFire float64
@@ -183,6 +172,37 @@ func stressSustained(dur time.Duration) {
 		return
 	}
 	fmt.Printf("    PASS — sustained add rate held above 1k/sec; fire rate observed %.0f/sec\n\n", avgFire)
+}
+
+// sampleDrain samples the delayed backlog until it is nearly empty or the
+// deadline expires. Transient list failures are tolerated; the last successful
+// sample is returned so callers never need a second, unchecked request.
+func sampleDrain(deadline time.Time, interval time.Duration, fetch func() (*listTasksResult, error)) (int, []float64, error) {
+	prev := -1
+	var (
+		fireRates []float64
+		lastErr   error
+	)
+	for time.Now().Before(deadline) {
+		res, err := fetch()
+		if err != nil {
+			lastErr = err
+		} else {
+			cur := res.Total
+			if prev >= 0 {
+				fireRates = append(fireRates, float64(prev-cur))
+			}
+			prev = cur
+			if cur < 100 {
+				return cur, fireRates, nil
+			}
+		}
+		time.Sleep(interval)
+	}
+	if prev < 0 {
+		return 0, nil, fmt.Errorf("no successful samples before deadline: %w", lastErr)
+	}
+	return prev, fireRates, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────
